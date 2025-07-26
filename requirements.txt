@@ -459,7 +459,9 @@ pyobjc-framework-cocoa==11.0
     #   pyobjc-framework-imagecapturecore
     #   pyobjc-framework-installerplugins
     #   pyobjc-framework-intents
+    #   pyobjc-framework-intentsui
     #   pyobjc-framework-iobluetooth
+    #   pyobjc-framework-iobluetoothui
     #   pyobjc-framework-iosurface
     #   pyobjc-framework-ituneslibrary
     #   pyobjc-framework-kernelmanagement
@@ -474,6 +476,7 @@ pyobjc-framework-cocoa==11.0
     #   pyobjc-framework-mediaaccessibility
     #   pyobjc-framework-mediaextension
     #   pyobjc-framework-medialibrary
+    #   pyobjc-framework-mediaplayer
     #   pyobjc-framework-mediatoolbox
     #   pyobjc-framework-metal
     #   pyobjc-framework-metalkit
@@ -504,11 +507,13 @@ pyobjc-framework-cocoa==11.0
     #   pyobjc-framework-screencapturekit
     #   pyobjc-framework-screensaver
     #   pyobjc-framework-screentime
+    #   pyobjc-framework-searchkit
     #   pyobjc-framework-security
     #   pyobjc-framework-securityfoundation
     #   pyobjc-framework-securityinterface
     #   pyobjc-framework-sensitivecontentanalysis
     #   pyobjc-framework-servicemanagement
+    #   pyobjc-framework-sharedwithyou
     #   pyobjc-framework-sharedwithyoucore
     #   pyobjc-framework-shazamkit
     #   pyobjc-framework-social
@@ -958,3 +963,4 @@ websockets==15.0.1
     # via uvicorn
 yarl==1.19.0
     # via aiohttp
+twitchio

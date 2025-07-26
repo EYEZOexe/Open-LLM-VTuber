@@ -158,6 +158,12 @@ async def process_single_conversation(
                 avatar=context.character_config.avatar,
             )
             logger.info(f"AI response: {full_response}")
+            # Send the full response to websocket before returning
+            await websocket_send(
+                json.dumps(
+                    {"type": "full-text", "text": full_response, "is_final": True}
+                )
+            )
 
         return full_response  # Return accumulated full_response
 

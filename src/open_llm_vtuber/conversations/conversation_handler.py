@@ -104,7 +104,6 @@ async def handle_conversation_trigger(
                 user_input=user_input,
                 images=images,
                 session_emoji=session_emoji,
-                metadata=metadata,
             )
         )
 

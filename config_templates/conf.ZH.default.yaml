@@ -402,7 +402,6 @@ character_config:
       voice_id: 'female-shaonv' # minimax 语音 id，默认 'female-shaonv'
       # 自定义发音字典，默认为空。
       # 示例: '{"tone": ["测试/(ce4)(shi4)", "危险/dangerous"]}'
-      pronunciation_dict: ''
 
   # =================== Voice Activity Detection ===================
   vad_config:
@@ -453,3 +452,10 @@ live_config:
     room_ids: [1991478060]
     # SESSDATA cookie值（可选，用于认证请求，可以查看发送弹幕用户名）
     sessdata: ""
+  twitch_live:
+    # Twitch频道名称
+    channel: ""
+    # Twitch OAuth令牌
+    token: ""
+    # Bot昵称
+    bot_nick: ""

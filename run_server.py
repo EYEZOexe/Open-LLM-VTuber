@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 import tomli
 import uvicorn
+import threading
+import time
+import requests
 from loguru import logger
 from upgrade_codes.upgrade_manager import UpgradeManager
 
@@ -134,6 +137,7 @@ def run(console_log_level: str):
 
     atexit.register(WebSocketServer.clean_cache)
 
+
     # Load configurations from yaml file
     config: Config = validate_config(read_yaml("conf.yaml"))
     server_config = config.system_config
@@ -153,14 +157,36 @@ def run(console_log_level: str):
         logger.error(f"Failed to initialize server context: {e}")
         sys.exit(1)  # Exit if initialization fails
 
-    # Run the Uvicorn server
+    # Run the Uvicorn server in a thread
+    def start_uvicorn():
+        uvicorn.run(
+            app=server.app,
+            host=server_config.host,
+            port=server_config.port,
+            log_level=console_log_level.lower(),
+        )
+
     logger.info(f"Starting server on {server_config.host}:{server_config.port}")
-    uvicorn.run(
-        app=server.app,
-        host=server_config.host,
-        port=server_config.port,
-        log_level=console_log_level.lower(),
-    )
+    server_thread = threading.Thread(target=start_uvicorn, daemon=True)
+    server_thread.start()
+
+    # # Poll the server until it's up
+    # url = f"http://{server_config.host}:{server_config.port}/"
+    # for _ in range(60):  # Try for up to 60 seconds
+    #     try:
+    #         response = requests.get(url)
+    #         if response.status_code == 200:
+    #             logger.info("Server is up, starting run_my_platform_live.py...")
+    #             subprocess.Popen([sys.executable, str(Path(__file__).parent / "scripts" / "run_my_platform_live.py")])
+    #             logger.info("Started run_my_platform_live.py as a background process.")
+    #             break
+    #     except Exception:
+    #         pass
+    #     time.sleep(1)
+    # else:
+    #     logger.error("Server did not start within 60 seconds. run_my_platform_live.py will not be started.")
+
+    server_thread.join()
 
 
 if __name__ == "__main__":
