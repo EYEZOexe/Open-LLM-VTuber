@@ -3,7 +3,7 @@ import sys
 import os
 from loguru import logger
 
-# Ensure modules from the src directory can be imported
+# Ensure modules from the src directory can be imported VERY IMPORTANT TEST
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, project_root)
 
