@@ -165,6 +165,13 @@ async def process_single_conversation(
                 )
             )
 
+            # Trigger memory reflection using the latest chat history file
+            chat_history_dir = f"chat_history/{context.character_config.conf_uid}"
+            try:
+                await context.agent_engine.reflect_on_latest_conversation(chat_history_dir)
+            except Exception as e:
+                logger.error(f"Failed to reflect on latest conversation: {e}")
+
         return full_response  # Return accumulated full_response
 
     except asyncio.CancelledError:

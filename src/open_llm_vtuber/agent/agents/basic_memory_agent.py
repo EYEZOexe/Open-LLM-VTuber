@@ -28,6 +28,11 @@ from ...mcpp.tool_manager import ToolManager
 from ...mcpp.json_detector import StreamJSONDetector
 from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
+from ..memory_manager import ChromaMemoryManager
+import os
+import glob
+import json
+import re
 
 
 class BasicMemoryAgent(AgentInterface):
@@ -49,6 +54,7 @@ class BasicMemoryAgent(AgentInterface):
         tool_manager: Optional[ToolManager] = None,
         tool_executor: Optional[ToolExecutor] = None,
         mcp_prompt_string: str = "",
+        memory_reflection_interval: int = 5,  # New: configurable N
     ):
         """Initialize agent with LLM and configuration."""
         super().__init__()
@@ -67,6 +73,7 @@ class BasicMemoryAgent(AgentInterface):
         self._tool_executor = tool_executor
         self._mcp_prompt_string = mcp_prompt_string
         self._json_detector = StreamJSONDetector()
+        self.memory_manager = ChromaMemoryManager()
 
         self._formatted_tools_openai = []
         self._formatted_tools_claude = []
@@ -110,6 +117,29 @@ class BasicMemoryAgent(AgentInterface):
             )
 
         logger.info("BasicMemoryAgent initialized.")
+        self._message_count = 0  # New: message counter
+        self._memory_reflection_interval = memory_reflection_interval
+        self._conf_uid = None  # Store conversation UID for memory reflection
+        self._history_uid = None  # Store history UID for memory reflection
+        self.last_reflected_timestamp = None
+        self.last_reflected_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "chat_history", "mao_pro_001", "last_reflected_timestamp.txt")
+        self._load_last_reflected_timestamp()
+
+    def _load_last_reflected_timestamp(self):
+        try:
+            if os.path.exists(self.last_reflected_file):
+                with open(self.last_reflected_file, "r", encoding="utf-8") as f:
+                    self.last_reflected_timestamp = f.read().strip()
+        except Exception as e:
+            logger.warning(f"Failed to load last reflected timestamp: {e}")
+
+    def _save_last_reflected_timestamp(self, timestamp):
+        try:
+            os.makedirs(os.path.dirname(self.last_reflected_file), exist_ok=True)
+            with open(self.last_reflected_file, "w", encoding="utf-8") as f:
+                f.write(timestamp)
+        except Exception as e:
+            logger.warning(f"Failed to save last reflected timestamp: {e}")
 
     def _set_llm(self, llm: StatelessLLMInterface):
         """Set the LLM for chat completion."""
@@ -173,24 +203,28 @@ class BasicMemoryAgent(AgentInterface):
 
         self._memory.append(message_data)
 
-    def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
-        """Load memory from chat history."""
-        messages = get_history(conf_uid, history_uid)
+        # New: Increment message count and trigger reflection if needed
+        self._message_count += 1
+        if self._message_count >= self._memory_reflection_interval:
+            import asyncio
+            if hasattr(self, 'reflect_and_store_memories') and self._conf_uid and self._history_uid:
+                try:
+                    if asyncio.iscoroutinefunction(self.reflect_and_store_memories):
+                        asyncio.create_task(self.reflect_and_store_memories(self._conf_uid, self._history_uid, n_messages=self._memory_reflection_interval))
+                    else:
+                        self.reflect_and_store_memories(self._conf_uid, self._history_uid, n_messages=self._memory_reflection_interval)
+                except Exception as e:
+                    logger.warning(f"Memory reflection failed: {e}")
+            self._message_count = 0
 
-        self._memory = []
-        for msg in messages:
-            role = "user" if msg["role"] == "human" else "assistant"
-            content = msg["content"]
-            if isinstance(content, str) and content:
-                self._memory.append(
-                    {
-                        "role": role,
-                        "content": content,
-                    }
-                )
-            else:
-                logger.warning(f"Skipping invalid message from history: {msg}")
-        logger.info(f"Loaded {len(self._memory)} messages from history.")
+    def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
+        """Initialize memory context for the session, but do not load full chat history (ChromaDB recall only)."""
+        self._conf_uid = conf_uid  # Store for reflection
+        self._history_uid = history_uid  # Store for reflection
+        logger.info(f"Loading history for conf_uid={conf_uid}, history_uid={history_uid}")
+        # Do not load full chat history into self._memory; rely on ChromaDB recall only
+        self._memory = []  # Clear in-memory chat history
+        logger.info("Cleared in-memory chat history; using only ChromaDB for recall.")
 
     def handle_interrupt(self, heard_response: str) -> None:
         """Handle user interruption."""
@@ -240,13 +274,70 @@ class BasicMemoryAgent(AgentInterface):
         return "\n".join(message_parts).strip()
 
     def _to_messages(self, input_data: BatchInput) -> List[Dict[str, Any]]:
-        """Prepare messages for LLM API call."""
-        messages = self._memory.copy()
+        """Prepare messages for LLM API call, injecting relevant memories from ChromaDB and the active personality prompt."""
+        messages = []
+        # Load the active personality/system prompt using prompt_loader and conf.yaml for persona name
+        try:
+            import yaml
+            conf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'conf.yaml'))
+            with open(conf_path, 'r', encoding='utf-8') as f:
+                conf = yaml.safe_load(f)
+            character_config = conf.get('character_config', {})
+            persona_name = character_config.get('conf_name', None)
+            if persona_name:
+                try:
+                    system_prompt = prompt_loader.load_persona(persona_name)
+                except Exception as e:
+                    logger.warning(f"Failed to load persona prompt for '{persona_name}' using prompt_loader: {e}")
+                    system_prompt = self._system
+            else:
+                logger.warning("No persona name found in conf.yaml character_config. Using default system prompt.")
+                system_prompt = self._system
+        except Exception as e:
+            logger.warning(f"Failed to load persona name from conf.yaml: {e}")
+            system_prompt = self._system
+        # Query ChromaDB for relevant memories using the latest user input
+        user_query = self._to_text_prompt(input_data)
+        recalled_memories = []
+        if user_query:
+            try:
+                results = self.memory_manager.query_memories(user_query)
+                if isinstance(results, dict):
+                    for key in ("documents", "memories", "results", "data"):
+                        if key in results and isinstance(results[key], list):
+                            results = results[key]
+                            break
+                if isinstance(results, list):
+                    for mem in results[:3]:
+                        if isinstance(mem, dict):
+                            recalled_memories.append(mem.get('document') or mem.get('memory') or str(mem))
+                        else:
+                            recalled_memories.append(str(mem))
+                elif results:
+                    if isinstance(results, dict):
+                        recalled_memories.append(results.get('document' or 'memory' or str(results)))
+                    else:
+                        recalled_memories.append(str(results))
+            except Exception as e:
+                logger.warning(f"Failed to query ChromaDB for memories: {e}")
+        # Inject memories as context, not as a script
+        if recalled_memories:
+            memories_text = '\n'.join(f"- {m}" for m in recalled_memories)
+            messages.append({
+                "role": "system",
+                "content": f"{system_prompt}\n\nYou have the following memories. Use them to help answer the user's question if relevant, but do not repeat them verbatim or list them. Answer naturally and in character.\nMemories:\n{memories_text}"
+            })
+        else:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        # Add regular memory
+        messages.extend(self._memory.copy())
         user_content = []
-        text_prompt = self._to_text_prompt(input_data)
+        text_prompt = user_query
         if text_prompt:
             user_content.append({"type": "text", "text": text_prompt})
-
         if input_data.images:
             image_added = False
             for img_data in input_data.images:
@@ -264,27 +355,22 @@ class BasicMemoryAgent(AgentInterface):
                     logger.error(
                         f"Invalid image data format: {type(img_data.data)}. Skipping image."
                     )
-
             if not image_added and not text_prompt:
                 logger.warning(
                     "User input contains images but none could be processed."
                 )
-
         if user_content:
             user_message = {"role": "user", "content": user_content}
             messages.append(user_message)
-
             skip_memory = False
             if input_data.metadata and input_data.metadata.get("skip_memory", False):
                 skip_memory = True
-
             if not skip_memory:
                 self._add_message(
                     text_prompt if text_prompt else "[User provided image(s)]", "user"
                 )
         else:
             logger.warning("No content generated for user message.")
-
         return messages
 
     async def _claude_tool_interaction_loop(
@@ -700,3 +786,90 @@ class BasicMemoryAgent(AgentInterface):
             logger.error(f"Missing formatting key in group conversation prompt: {e}")
         except Exception as e:
             logger.error(f"Failed to load group conversation prompt: {e}")
+
+    def summarize_latest_chat_history(self, chat_history_dir, role_filter=None):
+        # Find the latest chat history file by filename (sorted by date/time)
+        files = glob.glob(os.path.join(chat_history_dir, "*.json"))
+        if not files:
+            logger.warning(f"No chat history files found in {chat_history_dir}")
+            return None, None
+        latest_file = max(files, key=os.path.getmtime)
+        with open(latest_file, "r", encoding="utf-8") as f:
+            chat_data = json.load(f)
+        # Filter out metadata and only include human/ai roles
+        chat_data = [msg for msg in chat_data if msg.get("role") in ("human", "ai")]
+        # Optionally filter by role
+        if role_filter:
+            chat_data = [msg for msg in chat_data if msg.get("role") == role_filter]
+        return chat_data, latest_file
+
+    async def reflect_and_store_memories(self, conf_uid: str, history_uid: str, n_messages: int = 20, chat_history_dir=None):
+        import re
+        chat_section = ""
+        latest_chat_data = None
+        latest_file = None
+        # Always use the latest chat history file in chat_history/mao_pro_001 if no dir is specified
+        if chat_history_dir is None:
+            chat_history_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "chat_history", "mao_pro_001")
+        latest_chat_data, latest_file = self.summarize_latest_chat_history(chat_history_dir)
+        # Only process new messages since last reflected timestamp
+        new_messages = []
+        if latest_chat_data:
+            for msg in latest_chat_data:
+                ts = msg.get("timestamp")
+                if not ts or not msg.get("content", "").strip():
+                    continue
+                if not self.last_reflected_timestamp or ts > self.last_reflected_timestamp:
+                    new_messages.append(msg)
+        if not new_messages:
+            logger.info("No new messages to reflect.")
+            return
+        chat_section += "[Summary of new conversation messages:]\n"
+        for msg in new_messages:
+            role = msg.get("role")
+            content = msg.get('content', '').strip()
+            # Remove emotes in square brackets
+            content = re.sub(r"\\[[^\\]]*\\]", "", content).strip()
+            if not content:
+                continue
+            if role == "human":
+                chat_section += f"User: {content}\n"
+            elif role == "ai":
+                chat_section += f"AI: {content}\n"
+        if not chat_section.strip():
+            return
+        prompt = (
+            "From the following conversation, extract all interesting facts, events, or details you think are important or memorable. "
+            "Respond with a bullet list. For each bullet, specify if it is something the AI said (prefix with 'AI:') or something the user said (prefix with 'User:'). Respond in English only. Only summarize what is actually present in the conversation. Do not speculate or invent details.\n" + chat_section
+        )
+        try:
+            response = ""
+            async for chunk in self._llm.chat_completion([
+                {"role": "user", "content": prompt}
+            ], self._system):
+                if isinstance(chunk, dict) and "text" in chunk:
+                    response += chunk["text"]
+                elif isinstance(chunk, str):
+                    response += chunk
+            for line in response.split("\n"):
+                line = line.strip("- ")
+                if not line:
+                    continue
+                mem = line
+                if mem and not self.memory_manager.memory_exists(mem):
+                    self.memory_manager.add_memory(mem)
+            # Update last reflected timestamp to the latest message processed
+            self.last_reflected_timestamp = new_messages[-1]["timestamp"]
+            self._save_last_reflected_timestamp(self.last_reflected_timestamp)
+            logger.info(f"Reflected and stored new memories: {response}")
+        except Exception as e:
+            logger.error(f"Failed to reflect and store memories: {e}")
+
+    async def reflect_on_latest_conversation(self, chat_history_dir):
+        """
+        Public method to summarize and store memories from the latest chat history file.
+        This can be called externally (e.g., from a conversation manager or handler)
+        to ensure the latest conversation is always reflected in memory.
+        """
+        # Use dummy conf_uid and history_uid since we only want to use the latest chat history file
+        await self.reflect_and_store_memories(conf_uid=None, history_uid=None, n_messages=0, chat_history_dir=chat_history_dir)
